@@ -52,6 +52,11 @@ def render_pdf(report: dict, pdf_path: str):
             else:
                 write_line(line, size=size, leading=leading)
 
+    def _short_hash(hv: str, n: int = 16) -> str:
+        if not hv: return "N/A"
+        hv = str(hv)
+        return hv if len(hv) <= n else hv[:n] + "…"
+
     # ------------------------
     # Header
     # ------------------------
@@ -149,6 +154,79 @@ def render_pdf(report: dict, pdf_path: str):
         pperm = cmp_.get("permutation_test_p_greater")
         ci_txt = f"{ci[0]} to {ci[1]}" if isinstance(ci, (list, tuple)) and len(ci) == 2 else "N/A"
         write_line(f"ΔAUC (RF - LR): {dauc}  |  CI95: {ci_txt}  |  Permutation p (RF>LR): {pperm}")
+
+    # ------------------------
+    # Retrieval / Sources (web + local)
+    # ------------------------
+    retr = (report.get("retrieval") or {}).get("sources") or []
+    if retr:
+        write_heading("Retrieval / Sources")
+        for i, s in enumerate(retr[:6], start=1):
+            title = s.get("title") or (s.get("source") or {}).get("name") or "Untitled"
+            url = s.get("url") or (s.get("source") or {}).get("name")
+            author = s.get("author")
+            date = s.get("date")
+            score = s.get("score")
+            rank = s.get("rank")
+            doc_hash = s.get("doc_hash")
+
+            meta_bits = []
+            if rank is not None: meta_bits.append(f"rank {rank}")
+            if score is not None: meta_bits.append(f"score {round(score,4)}")
+            if author: meta_bits.append(f"author {author}")
+            if date: meta_bits.append(f"date {date}")
+            meta_tail = ("  [" + "; ".join(meta_bits) + "]") if meta_bits else ""
+
+            wrap_text(f"{i}. {title}{meta_tail}", width_chars=95)
+            if url:
+                wrap_text(f"URL: {url}", width_chars=95, size=9, leading=12)
+
+            quote = s.get("quote")
+            if quote:
+                # normalize whitespace for nicer wrapping
+                qnorm = " ".join(str(quote).split())
+                wrap_text(f'“{qnorm}”', width_chars=95, size=10, leading=13)
+
+            if doc_hash:
+                write_line(f"doc_hash: {_short_hash(doc_hash)}", size=9, leading=12)
+
+            y -= 6  # small spacer between sources
+
+    # Source Summaries (LLM)
+    summ = (report.get("retrieval") or {}).get("summaries") or []
+    if summ:
+        write_heading("Source Summaries")
+        for i, it in enumerate(summ[:6], start=1):
+            title = it.get("title") or "Untitled"
+            url = it.get("url") or ""
+            tldr = it.get("tldr") or ""
+            wrap_text(f"{i}. {title}", width_chars=95)
+            if url:
+                wrap_text(f"URL: {url}", width_chars=95, size=9, leading=12)
+            if tldr:
+                wrap_text(f"TL;DR: {tldr}", width_chars=95, size=10, leading=13)
+            y -= 6
+
+    # ------------------------
+    # Conclusion (LLM)
+    # ------------------------
+    conc = report.get("conclusion") or {}
+    if conc.get("text"):
+        write_heading("Conclusion")
+        wrap_text(conc.get("text"), width_chars=95, size=11, leading=14)
+
+        if conc.get("strength"):
+            write_line(f"Strength of evidence: {conc['strength']}", size=11, leading=14)
+
+        if isinstance(conc.get("limitations"), list) and conc["limitations"]:
+            write_heading("Limitations", size=12)
+            for item in conc["limitations"][:8]:
+                wrap_text(f"• {item}", width_chars=95, size=10, leading=13)
+
+        if isinstance(conc.get("next_steps"), list) and conc["next_steps"]:
+            write_heading("Next steps", size=12)
+            for item in conc["next_steps"][:8]:
+                wrap_text(f"• {item}", width_chars=95, size=10, leading=13)
 
     # ------------------------
     # Environment

@@ -1,4 +1,4 @@
-import os, json, subprocess, pathlib, time
+import os, json, subprocess, pathlib, time, asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -11,6 +11,8 @@ import urllib.request, base64, copy
 from app.core.retrieval import build_retriever
 from app.core.ml_experiment import run_ml_experiment
 from app.core.hypothesis import generate_hypotheses
+from app.core.websearch import WebSearch
+from app.core.llm import summarize_sources_with_llm, build_conclusion_with_llm, build_hypotheses_with_llm
 load_dotenv()
 
 ARTIFACT_DIR = pathlib.Path(__file__).resolve().parent.parent / "artifacts"
@@ -45,6 +47,29 @@ def _init_retriever():
     except Exception as e:
         print("[retrieval] failed to init:", e)
 
+WEB: WebSearch | None = None
+@app.on_event("startup")
+def _init_web():
+    global WEB
+    try:
+        WEB = WebSearch.from_env()
+        print(f"[web] provider={WEB.provider}")
+    except Exception as e:
+        print("[web] init failed:", e)
+
+#llm test
+@app.get("/api/llm/hypotheses")
+def llm_hypotheses(q: str = "Will RF outperform LR on AUC?"):
+    data, meta = build_hypotheses_with_llm(q, {"name":"sklearn_breast_cancer","target_name":"malignant_vs_benign"}, [])
+    return {"meta": meta, "data": data}
+
+@app.get("/api/retrieval/web")
+def web_retrieval(q: str, k: int = 3):
+    if not WEB:
+        raise HTTPException(500, "web search not initialized")
+    results = asyncio.run(WEB.search_and_summarize(q, k))
+    return {"query": q, "results": results}
+
 @app.get("/api/retrieval/search")
 def retrieval_search(q: str, k: int = 3):
     if not RETRIEVER:
@@ -62,18 +87,97 @@ def run(req: RunReq):
     question = (req.question or "")[:500]
     mode = str(getattr(req, "experiment", None) or "ttest").lower().strip()
 
+    # ---- retrieval helpers (web + local, dedup, cap) ----
+    def _dedupe_sources(items, max_k=5):
+        seen = set()
+        out = []
+        for s in items:
+            key = (s.get("url")
+                   or (s.get("source") or {}).get("name")
+                   or s.get("title"))
+            if not key:
+                continue
+            k = key.strip().lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(s)
+            if len(out) >= max_k:
+                break
+        return out
+
+    def _get_sources(q: str, fallback_q: str, top_k_web=3, top_k_local=3, final_cap=5):
+        use_web = os.getenv("ENABLE_WEB_RETRIEVAL", "true").lower() == "true"
+        q_eff = (q or fallback_q).strip() or fallback_q
+
+        web_sources = []
+        if use_web and WEB:
+            try:
+                web_sources = asyncio.run(WEB.search_and_summarize(q_eff, k=top_k_web))
+            except Exception:
+                web_sources = []
+
+        local_sources = []
+        if RETRIEVER:
+            try:
+                local_sources = RETRIEVER.search(q_eff, top_k=top_k_local)
+            except Exception:
+                local_sources = []
+
+        # order: web first (fresh), then local (context)
+        merged = (web_sources or []) + (local_sources or [])
+        return _dedupe_sources(merged, max_k=final_cap)
+
     # ---------- Build report (ML or t-test), with FINAL artifacts (names only) ----------
     if mode == "ml":
         ml = run_ml_experiment()
         ds_meta = {"name": ml["dataset"]["name"], "target_name": ml["dataset"]["target_name"]}
-        hyps = generate_hypotheses(question, ds_meta)
-        sources = []
-        try:
-            if RETRIEVER:
-                q_for_search = question or "model performance comparison"
-                sources = RETRIEVER.search(q_for_search, top_k=3)
-        except Exception:
-            sources = []
+        sources = _get_sources(question, "model performance comparison")
+        summaries = []
+        summarizer_id = None
+        if os.getenv("ENABLE_LLM", "false").lower() == "true" and sources:
+            try:
+                sdata, smeta = summarize_sources_with_llm(sources, max_items=3)
+                summaries = sdata.get("summaries", [])
+                summarizer_id = f"{smeta.get('provider')}:{smeta.get('model')}"
+            except Exception:
+                summaries = []
+                summarizer_id = None
+        hyps = generate_hypotheses(question, ds_meta, sources)
+        conclusion = {}
+        concluder_id = None
+        if os.getenv("ENABLE_LLM","false").lower() == "true":
+            try:
+                plan_for_llm = {
+                    "design": ml["design"]["task"],
+                    "primary_metric": ml["design"]["primary_metric"],
+                    "test_size": ml["design"]["test_size"],
+                    "seed": ml["design"]["seed"]
+                }
+                results_for_llm = {
+                    "dataset": ml["dataset"],
+                    "metrics": ml["metrics"],
+                    "comparison": ml["comparison"]
+                }
+                cdata, cmeta = build_conclusion_with_llm(question, plan_for_llm, results_for_llm, sources, hyps)
+                conclusion = {
+                    "text": cdata.get("conclusion"),
+                    "strength": cdata.get("strength_of_evidence"),
+                    "limitations": cdata.get("limitations"),
+                    "next_steps": cdata.get("next_steps")
+                }
+                concluder_id = f"{cmeta.get('provider')}:{cmeta.get('model')}"
+            except Exception:
+                conclusion = {}
+                concluder_id = None
+        env_models = {"generator": "template-hypotheses-v1", "eval": "sklearn-1.5.1"}
+        if summarizer_id:
+            env_models["summarizer"] = summarizer_id
+        if concluder_id:
+            env_models["concluder"] = concluder_id
+        
+        
+
         report = {
             "schema": "amrra.report.v1",
             "run_id": run_id,
@@ -91,10 +195,11 @@ def run(req: RunReq):
                 "metrics": ml["metrics"],
                 "comparison": ml["comparison"]
             },
+            "conclusion": conclusion,
             "environment": {
                 "datasets": [{"name": ml["dataset"]["name"], "hash": "sha256:sklearn-canonical"}],
                 "code": {"image": "local-demo"},
-                "models": {"generator": "template-hypotheses-v1", "eval": "sklearn-1.5.1"},
+                "models": env_models,
                 "hardware": "cpu"
             },
             "artifacts": {
@@ -106,13 +211,51 @@ def run(req: RunReq):
         }
     else:
         results = run_toy_experiment(12345)
-        sources = []
-        try:
-            if RETRIEVER:
-                q_for_search = question or "two-sample t-test effect size"
-                sources = RETRIEVER.search(q_for_search, top_k=3)
-        except Exception:
-            sources = []
+        sources = _get_sources(question, "two-sample t-test effect size")
+        summaries = []
+        summarizer_id = None
+        if os.getenv("ENABLE_LLM", "false").lower() == "true" and sources:
+            try:
+                sdata, smeta = summarize_sources_with_llm(sources, max_items=3)
+                summaries = sdata.get("summaries", [])
+                summarizer_id = f"{smeta.get('provider')}:{smeta.get('model')}"
+            except Exception:
+                summaries = []
+                summarizer_id = None
+        hyps = generate_hypotheses(question, {"name":"toy","target_name":"group"}, sources)
+        conclusion = {}
+        concluder_id = None
+        if os.getenv("ENABLE_LLM","false").lower() == "true":
+            try:
+                plan_for_llm = {
+                    "design": results["design"],
+                    "alpha": results["alpha"],
+                    "seed": 12345,
+                    "n": results["n"]
+                }
+                results_for_llm = {
+                    "p_value": results["p"],
+                    "effect_size": results["effect_size"],
+                    "ci": results["ci"]
+                }
+                hyps_tt = ["H0: no difference", "H1: group B differs"]
+                cdata, cmeta = build_conclusion_with_llm(question, plan_for_llm, results_for_llm, sources, hyps_tt)
+                conclusion = {
+                    "text": cdata.get("conclusion"),
+                    "strength": cdata.get("strength_of_evidence"),
+                    "limitations": cdata.get("limitations"),
+                    "next_steps": cdata.get("next_steps")
+                }
+                concluder_id = f"{cmeta.get('provider')}:{cmeta.get('model')}"
+            except Exception:
+                conclusion = {}
+                concluder_id = None
+        env_models = {"generator": "template-hypotheses-v1", "eval": "sklearn-1.5.1"}
+        if summarizer_id:
+            env_models["summarizer"] = summarizer_id
+        if concluder_id:
+            env_models["concluder"] = concluder_id
+
         report = {
             "schema": "amrra.report.v1",
             "run_id": run_id,
@@ -121,10 +264,11 @@ def run(req: RunReq):
             "hypotheses": ["H0: no difference", "H1: group B differs"],
             "plan": {"design": results["design"], "n": results["n"], "alpha": results["alpha"], "seed": 12345},
             "results": {"p": results["p"], "effect_size": results["effect_size"], "ci": results["ci"]},
+            "conclusion": conclusion,
             "environment": {
                 "datasets": [{"name": "toy", "hash": "sha256:static-seeded"}],
                 "code": {"image": "local-demo"},
-                "models": {"generator": "prompt-template-v1", "eval": "custom-py"},
+                "models": env_models,
                 "hardware": "cpu"
             },
             "artifacts": {
@@ -201,6 +345,7 @@ def run(req: RunReq):
         },
         "hcs": hcs
     }
+
 
 @app.get("/api/artifacts/{filename}")
 def artifacts(filename: str):
