@@ -36,6 +36,21 @@ class RunReq(BaseModel):
 def health():
     return {"ok": True}
 
+@app.on_event("startup")
+def _init_retriever():
+    global RETRIEVER
+    try:
+        RETRIEVER = build_retriever(CORPUS_DIR)
+        print(f"[retrieval] index ready ({len(RETRIEVER.docs)} docs)")
+    except Exception as e:
+        print("[retrieval] failed to init:", e)
+
+@app.get("/api/retrieval/search")
+def retrieval_search(q: str, k: int = 3):
+    if not RETRIEVER:
+        raise HTTPException(500, "retriever not initialized")
+    return {"query": q, "results": RETRIEVER.search(q, top_k=k)}
+
 @app.post("/api/run")
 def run(req: RunReq):
     run_id = f"run_{int(time.time()*1000)}"
@@ -52,12 +67,18 @@ def run(req: RunReq):
         ml = run_ml_experiment()
         ds_meta = {"name": ml["dataset"]["name"], "target_name": ml["dataset"]["target_name"]}
         hyps = generate_hypotheses(question, ds_meta)
-
+        sources = []
+        try:
+            if RETRIEVER:
+                q_for_search = question or "model performance comparison"
+                sources = RETRIEVER.search(q_for_search, top_k=3)
+        except Exception:
+            sources = []
         report = {
             "schema": "amrra.report.v1",
             "run_id": run_id,
             "request": {"question": question},
-            "retrieval": {"sources": []},
+            "retrieval": {"sources": sources},
             "hypotheses": hyps,
             "plan": {
                 "design": ml["design"]["task"],
@@ -85,11 +106,18 @@ def run(req: RunReq):
         }
     else:
         results = run_toy_experiment(12345)
+        sources = []
+        try:
+            if RETRIEVER:
+                q_for_search = question or "two-sample t-test effect size"
+                sources = RETRIEVER.search(q_for_search, top_k=3)
+        except Exception:
+            sources = []
         report = {
             "schema": "amrra.report.v1",
             "run_id": run_id,
             "request": {"question": question},
-            "retrieval": {"sources": []},
+            "retrieval": {"sources": sources},
             "hypotheses": ["H0: no difference", "H1: group B differs"],
             "plan": {"design": results["design"], "n": results["n"], "alpha": results["alpha"], "seed": 12345},
             "results": {"p": results["p"], "effect_size": results["effect_size"], "ci": results["ci"]},
