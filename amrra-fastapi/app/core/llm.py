@@ -64,6 +64,147 @@ JSON_SCHEMA_CONCLUSION = {
     "additionalProperties": False
 }
 
+JSON_SCHEMA_STUDY = {
+    "type": "object",
+    "properties": {
+        "goals": {
+            "type": "array", "minItems": 1, "maxItems": 6,
+            "items": {"type": "string", "minLength": 12}
+        },
+        "power_analysis": {
+            "type": "object",
+            "properties": {
+                "assumptions": {
+                    "type": "object",
+                    "properties": {
+                        "primary_metric": {"type": "string"},
+                        "effect_size": {"type": ["number", "null"]},
+                        "alpha": {"type": ["number","null"]},
+                        "power": {"type": ["number","null"]}
+                    },
+                    "required": ["primary_metric"],
+                    "additionalProperties": True
+                },
+                "method": {"type": "string"},
+                "suggested_n": {"type": ["integer","null"]},
+                "notes": {"type": "string"}
+            },
+            "required": ["assumptions","method"],
+            "additionalProperties": False
+        },
+        "recommended_designs": {
+            "type": "array", "minItems": 1, "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "rationale": {"type": "string", "minLength": 30},
+                    "steps": {"type": "array", "minItems": 2, "maxItems": 10,
+                              "items": {"type": "string", "minLength": 8}}
+                },
+                "required": ["name","rationale","steps"],
+                "additionalProperties": False
+            }
+        },
+        "ablations": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "why": {"type": "string", "minLength": 15},
+                    "how": {"type": "string", "minLength": 15}
+                },
+                "required": ["name","why","how"],
+                "additionalProperties": False
+            }
+        },
+        "validation": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"},  # e.g., k-fold CV, holdout, temporal split, calibration
+                    "details": {"type": "string", "minLength": 15}
+                },
+                "required": ["type","details"],
+                "additionalProperties": False
+            }
+        },
+        "risks": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "risk": {"type": "string"},
+                    "mitigation": {"type": "string", "minLength": 15}
+                },
+                "required": ["risk","mitigation"],
+                "additionalProperties": False
+            }
+        },
+        "timeline": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "phase": {"type": "string"},
+                    "duration_days": {"type": ["integer","null"]},
+                    "deliverables": {"type": "string", "minLength": 10}
+                },
+                "required": ["phase","deliverables"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["recommended_designs"],
+    "additionalProperties": False
+}
+
+def build_study_design_with_llm(
+    question: str,
+    plan: dict,
+    results: dict,
+    sources: list,
+    constraints: dict | None = None,
+    max_tokens: int = 900
+):
+    """
+    Return a structured study-design recommendation grounded in current results.
+    """
+    sys = (
+        "You are a meticulous ML research designer. Propose a rigorous follow-up study "
+        "based ONLY on the provided results, plan, and quoted sources. Prefer conservative, "
+        "reproducible choices. Include power assumptions and a concrete sample-size suggestion "
+        "when feasible. Avoid speculative claims."
+    )
+
+    # Lightly compress sources for the prompt
+    src_str = ""
+    for i, s in enumerate((sources or [])[:5], start=1):
+        title = s.get("title") or (s.get("source") or {}).get("name") or "Untitled"
+        quote = (s.get("quote") or "").replace("\n", " ")
+        url = s.get("url") or (s.get("source") or {}).get("name") or ""
+        src_str += f"\n[{i}] {title}\nURL: {url}\n> {quote}\n"
+
+    user_payload = {
+        "question": question,
+        "plan": plan,
+        "results": results,
+        "sources": src_str or "(no external sources)",
+        "constraints": constraints or {"budget": None, "compute": None, "deadline_days": None}
+    }
+
+    client = LLMClient()
+    data, meta = client.chat_json(
+        sys,
+        "Using ONLY the JSON below, output a study-design plan that validates against the schema."
+        "\n\nINPUT:\n" + json.dumps(user_payload, ensure_ascii=False),
+        JSON_SCHEMA_STUDY,
+        max_tokens=max_tokens
+    )
+    return data, meta
+
 def build_conclusion_with_llm(
     question: str,
     plan: dict,

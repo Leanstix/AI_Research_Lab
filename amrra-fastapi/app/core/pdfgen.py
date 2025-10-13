@@ -229,6 +229,77 @@ def render_pdf(report: dict, pdf_path: str):
                 wrap_text(f"• {item}", width_chars=95, size=10, leading=13)
 
     # ------------------------
+    # Study Design Recommendations
+    # ------------------------
+    rec = report.get("plan_recommendations") or {}
+    if rec:
+        write_heading("Study Design Recommendations")
+
+        goals = rec.get("goals") or []
+        if goals:
+            write_heading("Goals", size=12)
+            for g in goals[:6]:
+                wrap_text(f"• {g}", width_chars=95, size=10, leading=13)
+
+        pa = rec.get("power_analysis") or {}
+        if pa:
+            write_heading("Power Analysis", size=12)
+            ass = pa.get("assumptions") or {}
+            if ass:
+                wrap_text(f"Primary metric: {ass.get('primary_metric','N/A')}", width_chars=95, size=10)
+                if ass.get("effect_size") is not None:
+                    wrap_text(f"Effect size (assumed): {ass.get('effect_size')}", width_chars=95, size=10)
+                if ass.get("alpha") is not None:
+                    wrap_text(f"Alpha: {ass.get('alpha')}", width_chars=95, size=10)
+                if ass.get("power") is not None:
+                    wrap_text(f"Power: {ass.get('power')}", width_chars=95, size=10)
+            wrap_text(f"Method: {pa.get('method','N/A')}", width_chars=95, size=10)
+            if pa.get("suggested_n") is not None:
+                wrap_text(f"Suggested sample size (n): {pa.get('suggested_n')}", width_chars=95, size=10)
+            if pa.get("notes"):
+                wrap_text(f"Notes: {pa.get('notes')}", width_chars=95, size=10)
+
+        rds = rec.get("recommended_designs") or []
+        if rds:
+            write_heading("Proposed Designs", size=12)
+            for d in rds[:5]:
+                wrap_text(f"• {d.get('name','Design')}", width_chars=95, size=10)
+                wrap_text(f"  Rationale: {d.get('rationale','')}", width_chars=95, size=10, leading=13)
+                steps = d.get("steps") or []
+                for j, s in enumerate(steps[:8], start=1):
+                    wrap_text(f"   {j}) {s}", width_chars=95, size=10, leading=13)
+
+        abls = rec.get("ablations") or []
+        if abls:
+            write_heading("Ablations", size=12)
+            for a in abls[:8]:
+                wrap_text(f"• {a.get('name','Ablation')}", width_chars=95, size=10)
+                wrap_text(f"  Why: {a.get('why','')}", width_chars=95, size=10, leading=13)
+                wrap_text(f"  How: {a.get('how','')}", width_chars=95, size=10, leading=13)
+
+        vals = rec.get("validation") or []
+        if vals:
+            write_heading("Validation", size=12)
+            for v in vals[:8]:
+                wrap_text(f"• {v.get('type','Validation')} — {v.get('details','')}", width_chars=95, size=10, leading=13)
+
+        risks = rec.get("risks") or []
+        if risks:
+            write_heading("Risks & Mitigations", size=12)
+            for r in risks[:8]:
+                wrap_text(f"• Risk: {r.get('risk','')}", width_chars=95, size=10)
+                wrap_text(f"  Mitigation: {r.get('mitigation','')}", width_chars=95, size=10, leading=13)
+
+        timeline = rec.get("timeline") or []
+        if timeline:
+            write_heading("Timeline", size=12)
+            for t in timeline[:8]:
+                dur = t.get("duration_days")
+                dur_txt = f" (~{dur} days)" if isinstance(dur, int) else ""
+                wrap_text(f"• {t.get('phase','Phase')}{dur_txt}", width_chars=95, size=10)
+                wrap_text(f"  Deliverables: {t.get('deliverables','')}", width_chars=95, size=10, leading=13)
+
+    # ------------------------
     # Environment
     # ------------------------
     env = report.get("environment", {}) or {}

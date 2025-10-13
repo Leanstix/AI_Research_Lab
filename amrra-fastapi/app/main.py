@@ -12,7 +12,11 @@ from app.core.retrieval import build_retriever
 from app.core.ml_experiment import run_ml_experiment
 from app.core.hypothesis import generate_hypotheses
 from app.core.websearch import WebSearch
-from app.core.llm import summarize_sources_with_llm, build_conclusion_with_llm, build_hypotheses_with_llm
+from app.core.llm import (summarize_sources_with_llm, 
+                          build_conclusion_with_llm, 
+                          build_hypotheses_with_llm,
+                          build_study_design_with_llm
+                          )
 load_dotenv()
 
 ARTIFACT_DIR = pathlib.Path(__file__).resolve().parent.parent / "artifacts"
@@ -22,10 +26,9 @@ PORT = int(os.getenv("PORT", "8000"))
 HEDERA_NETWORK = os.getenv("HEDERA_NETWORK", "testnet")
 OP_ID = os.getenv("HEDERA_OPERATOR_ID")
 OP_KEY = os.getenv("HEDERA_OPERATOR_KEY")
-TOPIC_ID = os.getenv("HCS_TOPIC_ID")  # may be empty
-CORPUS_DIR = os.getenv("CORPUS_DIR")  # e.g., ./corpus (put .txt/.md there)
+TOPIC_ID = os.getenv("HCS_TOPIC_ID")
+CORPUS_DIR = os.getenv("CORPUS_DIR")
 RETRIEVER = None
-
 app = FastAPI(title="AMRRA Research Lab (FastAPI)")
 
 def _valid_topic_id(x: str) -> bool:
@@ -170,11 +173,42 @@ def run(req: RunReq):
             except Exception:
                 conclusion = {}
                 concluder_id = None
+
+        study_rec = {}
+        recommender_id = None
+        if os.getenv("ENABLE_LLM","false").lower() == "true":
+            try:
+                plan_for_llm = {
+                    "design": ml["design"]["task"],
+                    "primary_metric": ml["design"]["primary_metric"],
+                    "test_size": ml["design"]["test_size"],
+                    "seed": ml["design"]["seed"]
+                }
+                results_for_llm = {
+                    "dataset": ml["dataset"],
+                    "metrics": ml["metrics"],
+                    "comparison": ml["comparison"]
+                }
+                sdata, smeta = build_study_design_with_llm(
+                    question=question,
+                    plan=plan_for_llm,
+                    results=results_for_llm,
+                    sources=sources,
+                    constraints={"budget": None, "compute": "CPU", "deadline_days": 7}
+                )
+                study_rec = sdata
+                recommender_id = f"{smeta.get('provider')}:{smeta.get('model')}"
+            except Exception:
+                study_rec = {}
+                recommender_id = None
+
         env_models = {"generator": "template-hypotheses-v1", "eval": "sklearn-1.5.1"}
         if summarizer_id:
             env_models["summarizer"] = summarizer_id
         if concluder_id:
             env_models["concluder"] = concluder_id
+        if recommender_id:
+            env_models["recommender"] = recommender_id
         
         
 
@@ -196,6 +230,7 @@ def run(req: RunReq):
                 "comparison": ml["comparison"]
             },
             "conclusion": conclusion,
+            "plan_recommendations": study_rec,
             "environment": {
                 "datasets": [{"name": ml["dataset"]["name"], "hash": "sha256:sklearn-canonical"}],
                 "code": {"image": "local-demo"},
@@ -250,11 +285,42 @@ def run(req: RunReq):
             except Exception:
                 conclusion = {}
                 concluder_id = None
+
+        study_rec = {}
+        recommender_id = None
+        if os.getenv("ENABLE_LLM","false").lower() == "true":
+            try:
+                plan_for_llm = {
+                    "design": results["design"],
+                    "alpha": results["alpha"],
+                    "seed": 12345,
+                    "n": results["n"]
+                }
+                results_for_llm = {
+                    "p_value": results["p"],
+                    "effect_size": results["effect_size"],
+                    "ci": results["ci"]
+                }
+                sdata, smeta = build_study_design_with_llm(
+                    question=question,
+                    plan=plan_for_llm,
+                    results=results_for_llm,
+                    sources=sources,
+                    constraints={"budget": None, "compute": "CPU", "deadline_days": 7}
+                )
+                study_rec = sdata
+                recommender_id = f"{smeta.get('provider')}:{smeta.get('model')}"
+            except Exception:
+                study_rec = {}
+                recommender_id = None
+
         env_models = {"generator": "template-hypotheses-v1", "eval": "sklearn-1.5.1"}
         if summarizer_id:
             env_models["summarizer"] = summarizer_id
         if concluder_id:
             env_models["concluder"] = concluder_id
+        if recommender_id:
+            env_models["recommender"] = recommender_id
 
         report = {
             "schema": "amrra.report.v1",
@@ -265,6 +331,7 @@ def run(req: RunReq):
             "plan": {"design": results["design"], "n": results["n"], "alpha": results["alpha"], "seed": 12345},
             "results": {"p": results["p"], "effect_size": results["effect_size"], "ci": results["ci"]},
             "conclusion": conclusion,
+            "plan_recommendations": study_rec,
             "environment": {
                 "datasets": [{"name": "toy", "hash": "sha256:static-seeded"}],
                 "code": {"image": "local-demo"},
