@@ -183,7 +183,6 @@ def render_pdf(report: dict, pdf_path: str):
 
             quote = s.get("quote")
             if quote:
-                # normalize whitespace for nicer wrapping
                 qnorm = " ".join(str(quote).split())
                 wrap_text(f'“{qnorm}”', width_chars=95, size=10, leading=13)
 
@@ -315,7 +314,6 @@ def render_pdf(report: dict, pdf_path: str):
     # ------------------------
     arts = report.get("artifacts", {}) or {}
     write_heading("Artifacts")
-    # Support both new {json:{name}, pdf:{name}} and legacy {json_path:..., pdf_path:...}
     json_name = (arts.get("json") or {}).get("name") if isinstance(arts.get("json"), dict) else None
     pdf_name  = (arts.get("pdf") or {}).get("name") if isinstance(arts.get("pdf"), dict) else None
     legacy_json_path = arts.get("json_path")

@@ -35,7 +35,7 @@ JSON_SCHEMA_SUMMARIES = {
                 "properties": {
                     "title": {"type": "string"},
                     "url": {"type": "string"},
-                    "tldr": {"type": "string", "minLength": 10}
+                    "tldr": {"type": "string", "minLength": 8}
                 },
                 "required": ["title","url","tldr"],
                 "additionalProperties": False
@@ -49,7 +49,7 @@ JSON_SCHEMA_SUMMARIES = {
 JSON_SCHEMA_CONCLUSION = {
     "type": "object",
     "properties": {
-        "conclusion": {"type": "string", "minLength": 300},
+        "conclusion": {"type": "string", "minLength": 200},
         "strength_of_evidence": {"type": "string", "enum": ["strong","moderate","weak","inconclusive"]},
         "limitations": {
             "type": "array", "minItems": 1, "maxItems": 8,
@@ -176,16 +176,12 @@ def build_study_design_with_llm(
         "You are a meticulous ML research designer. Propose a rigorous follow-up study "
         "based ONLY on the provided results, plan, and quoted sources. Prefer conservative, "
         "reproducible choices. Include power assumptions and a concrete sample-size suggestion "
-        "when feasible. Avoid speculative claims."
+        "when feasible. Avoid speculative claims. If the question is biomedical/clinical, DO NOT "
+        "make causal or treatment claims—limit to model metrics or stated quotes. If evidence is insufficient, say so."
     )
 
-    # Lightly compress sources for the prompt
-    src_str = ""
-    for i, s in enumerate((sources or [])[:5], start=1):
-        title = s.get("title") or (s.get("source") or {}).get("name") or "Untitled"
-        quote = (s.get("quote") or "").replace("\n", " ")
-        url = s.get("url") or (s.get("source") or {}).get("name") or ""
-        src_str += f"\n[{i}] {title}\nURL: {url}\n> {quote}\n"
+    # Pack sources for prompt (clipped & sanitized)
+    src_str = _pack_sources(sources, max_items=5)
 
     user_payload = {
         "question": question,
@@ -196,9 +192,11 @@ def build_study_design_with_llm(
     }
 
     client = LLMClient()
-    data, meta = client.chat_json(
+    data, meta = _retry_json(
+        client,
         sys,
-        "Using ONLY the JSON below, output a study-design plan that validates against the schema."
+        "Using ONLY the JSON below, output a study-design plan that validates against the schema. "
+        "Every numeric claim must be copied from the 'results' JSON or the quoted sources. Do not invent numbers."
         "\n\nINPUT:\n" + json.dumps(user_payload, ensure_ascii=False),
         JSON_SCHEMA_STUDY,
         max_tokens=max_tokens
@@ -222,16 +220,12 @@ def build_conclusion_with_llm(
     sys = (
         "You are a careful research analyst. Write a rigorous, detailed conclusion grounded in the provided "
         "metrics and quotes. Be conservative about causality and generalization. Explicitly reference numeric "
-        "results and uncertainty. No hallucination; use only provided info."
+        "results and uncertainty. No hallucination; use only provided info. If the question is biomedical/clinical, "
+        "DO NOT make causal or treatment claims; if evidence is insufficient, state that clearly."
     )
 
-    # Compact sources with quotes for the prompt
-    src_str = ""
-    for i, s in enumerate((sources or [])[:5], start=1):
-        title = s.get("title") or (s.get("source") or {}).get("name") or "Untitled"
-        quote = (s.get("quote") or "").replace("\n", " ")
-        url = s.get("url") or (s.get("source") or {}).get("name") or ""
-        src_str += f"\n[{i}] {title}\nURL: {url}\n> {quote}\n"
+    # Pack sources (clipped & sanitized)
+    src_str = _pack_sources(sources, max_items=5)
 
     user = {
         "question": question,
@@ -242,7 +236,6 @@ def build_conclusion_with_llm(
     }
 
     client = LLMClient()
-    # Choose model depending on provider (already handled internally)
     data, meta = client.chat_json(
         sys,
         "Using ONLY the provided JSON below, produce a structured conclusion.\n\nINPUT:\n" + json.dumps(user, ensure_ascii=False),
@@ -252,20 +245,54 @@ def build_conclusion_with_llm(
     return data, meta
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-    # Be forgiving: grab the largest top-level JSON block
-    if not text: return None
+    """Be forgiving: strip code fences; then parse full or largest top-level block."""
+    if not text:
+        return None
+    t = text.strip()
+    # Strip common ```json fences
+    if t.startswith("```"):
+        t = t.strip("`")
+        if "\n" in t and t[:10].lower().lstrip().startswith(("json", "javascript")):
+            t = t.split("\n", 1)[1]
+        t = t.strip()
+    # Fast path
     try:
-        return json.loads(text)
+        return json.loads(t)
     except Exception:
         pass
+    # Largest top-level block
     try:
-        start = text.find("{")
-        end = text.rfind("}")
+        start = t.find("{")
+        end = t.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(text[start:end+1])
+            candidate = t[start:end+1]
+            return json.loads(candidate)
     except Exception:
         return None
     return None
+
+def _pack_sources(sources: list, max_items: int = 5) -> str:
+    """Compact, clip and sanitize sources for prompts to keep tokens in check."""
+    buf: List[str] = []
+    for i, s in enumerate((sources or [])[:max_items], start=1):
+        title = (s.get("title") or (s.get("source") or {}).get("name") or "Untitled").strip()
+        quote = (s.get("quote") or "").replace("\n", " ").strip()
+        url = (s.get("url") or (s.get("source") or {}).get("name") or "").strip()
+        if len(quote) > 420:
+            quote = quote[:420].rsplit(" ", 1)[0] + "…"
+        buf.append(f"[{i}] {title}\nURL: {url}\n> {quote}")
+    return ("\n" + "\n".join(buf)) if buf else "(no external sources)"
+
+def _retry_json(client, system: str, user: str, schema: Dict[str, Any], max_tokens: int):
+    """One strict retry with a JSON-only clamp on validation/parse errors."""
+    try:
+        return client.chat_json(system, user, schema, max_tokens)
+    except (ValidationError, ValueError, RuntimeError):
+        stricter_user = (
+            "OUTPUT STRICT JSON ONLY. NO prose. NO code fences. "
+            "Return a value that VALIDATES against the schema.\n\n" + user
+        )
+        return client.chat_json(system, stricter_user, schema, max_tokens)
 
 class LLMClient:
     def __init__(self):
@@ -292,37 +319,35 @@ class LLMClient:
         else:
             raise RuntimeError(f"Unsupported LLM_PROVIDER: {self.provider}")
 
-    def _openai_json(self, system: str, user: str, schema: Dict[str, Any], max_tokens: int = 800) -> Dict[str, Any]:
-        # Use Chat Completions + structured outputs via response_format JSON schema
-        # Docs: Structured outputs & Chat API. :contentReference[oaicite:3]{index=3}
-        resp = self.client.chat.completions.create(
-            model=self.openai_model,
+    def _openai_json(self, system: str, user: str, schema: Dict[str, Any], max_tokens: int = 800, use_schema: bool = True) -> Tuple[Dict[str, Any], Optional[str]]:
+        """
+        Use Chat Completions. If use_schema=True, request structured outputs via response_format json_schema.
+        Returns (data, finish_reason).
+        """
+        kwargs = dict(
+            model=self.openai_model if self.provider == "openai" else self.openrouter_model,
             temperature=0,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_output",
-                    "schema": schema,
-                    "strict": True
-                }
-            },
-            messages=[
-                {"role":"system","content": system},
-                {"role":"user","content": user}
-            ],
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             max_tokens=max_tokens,
-            timeout=self.timeout
         )
-        text = (resp.choices[0].message.content or "").strip()
+        if use_schema:
+            kwargs["response_format"] = {"type": "json_schema", "json_schema": {"name": "structured_output", "schema": schema, "strict": True}}
+        # Handle SDK timeout kw differences (timeout vs request_timeout)
+        try:
+            resp = self.client.chat.completions.create(timeout=self.timeout, **kwargs)
+        except TypeError:
+            resp = self.client.chat.completions.create(request_timeout=self.timeout, **kwargs)
+        msg = resp.choices[0].message
+        text = (msg.content or "").strip()
         data = _extract_json(text)
         if not data:
             raise ValueError("Failed to parse JSON from OpenAI response")
         validate(instance=data, schema=schema)
-        return data
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        return data, finish_reason
 
     def _anthropic_json(self, system: str, user: str, schema: Dict[str, Any], max_tokens: int = 800) -> Dict[str, Any]:
         # Anthropic doesn't hard-enforce JSON schema; we enforce via prompt + validator.
-        # Docs: Messages API. :contentReference[oaicite:4]{index=4}
         prompt = (
             "You MUST respond with STRICT JSON ONLY that validates against this schema.\n"
             "Do not include prose before/after the JSON.\n"
@@ -350,9 +375,22 @@ class LLMClient:
         Returns (data, meta). 'data' is schema-validated JSON; 'meta' has provider/model/timing.
         """
         t0 = time.time()
-        if self.provider in ("openai", "openrouter"):
-            data = self._openai_json(system, user, schema, max_tokens=max_tokens)
-            model = self.openai_model if self.provider=="openai" else self.openrouter_model
+        finish_reason = None
+        if self.provider == "openai":
+            data, finish_reason = self._openai_json(system, user, schema, max_tokens=max_tokens, use_schema=True)
+            model = self.openai_model
+        elif self.provider == "openrouter":
+            # Try schema-enforced first; if model/provider rejects response_format, fall back
+            try:
+                data, finish_reason = self._openai_json(system, user, schema, max_tokens=max_tokens, use_schema=True)
+            except Exception:
+                prompt = (
+                    "You MUST respond with STRICT JSON ONLY that validates against this schema.\n"
+                    "No prose, no code fences, no comments.\n"
+                   f"SCHEMA:\n{json.dumps(schema)}\n\nUSER:\n{user}"
+                )
+                data, finish_reason = self._openai_json(system, prompt, schema, max_tokens=max_tokens, use_schema=False)
+            model = self.openrouter_model
         elif self.provider == "anthropic":
             data = self._anthropic_json(system, user, schema, max_tokens=max_tokens)
             model = self.anthropic_model
@@ -360,16 +398,14 @@ class LLMClient:
             raise RuntimeError("Bad provider")
         dt = int((time.time() - t0)*1000)
         meta = {"provider": self.provider, "model": model, "latency_ms": dt}
+        if finish_reason is not None:
+            meta["finish_reason"] = finish_reason
         return data, meta
 
 # ---------- High-level helpers ----------
 def build_hypotheses_with_llm(question: str, dataset_meta: Dict[str, Any], sources: List[Dict[str,Any]], max_items: int = 3):
     sys = "You are a careful research assistant. Propose falsifiable, non-trivial hypotheses aligned with the question and sources."
-    src_str = ""
-    for i, s in enumerate(sources[:5], start=1):
-        title = s.get("title") or (s.get("source") or {}).get("name") or "Untitled"
-        quote = s.get("quote") or ""
-        src_str += f"\n[{i}] {title}\n> {quote}\n"
+    src_str = _pack_sources(sources, max_items=5)
     ds = dataset_meta or {}
     user = (
         f"QUESTION: {question or 'N/A'}\n"
@@ -378,8 +414,7 @@ def build_hypotheses_with_llm(question: str, dataset_meta: Dict[str, Any], sourc
         f"Write {max_items} hypotheses tailored to this context."
     )
     client = LLMClient()
-    data, meta = client.chat_json(sys, user, JSON_SCHEMA_HYPOTHESES, max_tokens=600)
-    # Trim if model returned more than requested
+    data, meta = _retry_json(client, sys, user, JSON_SCHEMA_HYPOTHESES, max_tokens=600)
     data["hypotheses"] = data["hypotheses"][:max_items]
     return data, meta
 
@@ -391,5 +426,5 @@ def summarize_sources_with_llm(sources: List[Dict[str,Any]], max_items: int = 3)
         items.append({"title": title, "url": s.get("url") or (s.get("source") or {}).get("name"), "quote": s.get("quote","")})
     user = "Summarize each item into a one-sentence TL;DR using only its quote.\n" + json.dumps(items, ensure_ascii=False)
     client = LLMClient()
-    data, meta = client.chat_json(sys, user, JSON_SCHEMA_SUMMARIES, max_tokens=600)
+    data, meta = _retry_json(client, sys, user, JSON_SCHEMA_SUMMARIES, max_tokens=600)
     return data, meta

@@ -77,9 +77,12 @@ def run_ml_experiment() -> Dict[str, Any]:
     def stat(x, y):
         # here x is p_rf, y is p_lr; compare AUC on the same labels
         return roc_auc_score(y_test, x) - roc_auc_score(y_test, y)
+    n_resamples = 500
     perm = permutation_test((p_rf, p_lr), stat, permutation_type="pairings",
-                            alternative="greater", n_resamples=500, random_state=RANDOM_SEED)
+                            alternative="greater", n_resamples=n_resamples, random_state=RANDOM_SEED)
     p_perm = float(perm.pvalue)
+    # guard against exact-zero due to finite resamples
+    p_perm = max(p_perm, 1.0 / (n_resamples + 1))
 
     return {
         "dataset": {

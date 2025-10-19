@@ -6,7 +6,7 @@ def generate_hypotheses(question: str, dataset_meta: dict, sources: list = None)
     """
     Uses LLM when ENABLE_LLM=true, else returns deterministic hypotheses.
     """
-    use_llm = (os.getenv("ENABLE_LLM","false").lower() == "true")
+    use_llm = (os.getenv("ENABLE_LLM","true").lower() == "true")
     if use_llm:
         try:
             data, _meta = build_hypotheses_with_llm(question, dataset_meta or {}, sources or [], max_items=3)
