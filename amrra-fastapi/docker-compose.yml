@@ -1,0 +1,36 @@
+version: "3.9"
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  api:
+    build: .
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CORPUS_DIR=/data/corpus
+      - SEARCH_PROVIDER=duckduckgo
+      - ENABLE_LLM=false
+    volumes:
+      - ./:/app
+      - ./artifacts:/app/artifacts
+      - ./corpus:/data/corpus
+      - ./runs:/app/runs
+    ports: ["8000:8000"]
+    depends_on: [redis]
+
+  worker:
+    build: .
+    command: python worker/worker.py
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CORPUS_DIR=/data/corpus
+      - SEARCH_PROVIDER=duckduckgo
+      - ENABLE_LLM=false
+    volumes:
+      - ./:/app
+      - ./artifacts:/app/artifacts
+      - ./corpus:/data/corpus
+      - ./runs:/app/runs
+    depends_on: [redis]

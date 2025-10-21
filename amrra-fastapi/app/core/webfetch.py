@@ -3,12 +3,8 @@ import trafilatura, re, html
 from typing import Optional, Dict
 
 def fetch_and_extract(url: str) -> Optional[Dict]:
-    """
-    Download and extract readable content & metadata from a URL.
-    Returns {title, text, author, date, url} or None.
-    """
     try:
-        raw = trafilatura.fetch_url(url, no_ssl=True)  # robust; handles redirects/https quirks
+        raw = trafilatura.fetch_url(url, no_ssl=True)
         if not raw:
             return None
         meta = trafilatura.extract(
@@ -48,9 +44,6 @@ def fetch_and_extract(url: str) -> Optional[Dict]:
         return None
 
 def best_quote(text: str, query: str, max_chars: int = 280) -> str:
-    """
-    Tiny heuristic: pick the sentence (or pair) with the most query-overlap.
-    """
     sents = re.split(r'(?<=[.!?])\s+', text)
     if not sents:
         return text[:max_chars]

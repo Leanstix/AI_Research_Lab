@@ -1,4 +1,13 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-dotenv==1.0.1
-reportlab==4.2.5
+fastapi
+uvicorn
+python-dotenv
+httpx
+beautifulsoup4
+trafilatura
+reportlab
+scikit-learn
+scipy
+redis
+rq
+jsonschema
+pydantic
